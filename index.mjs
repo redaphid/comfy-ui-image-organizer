@@ -9,12 +9,16 @@ const exec = promisify(execCallBack);
 const getTimestamp = async (imagePath) => {
   // get file modified date
   const { mtime } = await fs.stat(imagePath);
+  console.log('mtime:', mtime);
   return new Date(mtime).toISOString();
 };
 
 const getModelDirName = async (imagePath) => {
   // exec exiftool -p prompt imagePath
-  const { stdout } = await exec(`exiftool -b -prompt ${imagePath.trim()}`, { maxBuffer: 1024 * 1024 * 1024 });
+  const exifCommand = `exiftool -b -prompt "${imagePath.trim()}"`;
+  console.log('exifCommand:', exifCommand);
+ try {
+  const { stdout } = await exec(exifCommand, { maxBuffer: 1024 * 1024 * 1024 });
   const flow = JSON.parse(stdout);
   const models = [];
   for (const nodeId in flow) {
@@ -24,9 +28,13 @@ const getModelDirName = async (imagePath) => {
     }
   }
   return models.join('/');
+} catch (error) {
+  return "unknown";
+}
 };
 
 const getDestDir = (imagePath, timestamp, modelDirName) => {
+  console.log('getDestDir:', imagePath, timestamp, modelDirName);
   const newFileName = new Date(timestamp).getTime() + '.png';
   const dateDirName = new Date(timestamp).toISOString().split('T')[0];
   const destDir = path.join('./out',dateDirName, modelDirName, newFileName);
@@ -52,23 +60,17 @@ const findImageFiles = async (dirPath) => {
     const stat = await fs.stat(filePath);
     if (stat.isDirectory()) {
       console.log('filePath:', filePath, 'isDirectory');
-      await findImageFiles(filePath);
+      findImageFiles(filePath);
       continue;
     }
     console.log("is file", filePath);
-    // if it starts with %, then ignore it for now
-    if (file.includes('%')) {
-      console.log('ignoring', file);
+
+    const [timestamp,modelDirName] = await Promise.allSettled([getTimestamp(filePath),getModelDirName(filePath)]);
+    if(timestamp.status === 'rejected' || modelDirName.status === 'rejected'){
+      console.log('Error getting timestamp or modelDirName', timestamp, modelDirName);
       continue;
     }
-    // if the file doesn't end with .png, ignore it
-    if (!file.endsWith('.png')) {
-      console.log('ignoring', file);
-      continue;
-    }
-    const timestamp = await getTimestamp(filePath);
-    const modelDirName = await getModelDirName(filePath);
-    const destDir = getDestDir(filePath, timestamp, modelDirName);
+    const destDir = getDestDir(filePath, timestamp.value, modelDirName.value);
     console.log({ destDir });
 
     // Move the file to the new directory
