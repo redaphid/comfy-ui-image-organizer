@@ -3,12 +3,13 @@ import * as fs from 'fs/promises';
 import {exec as execCallBack} from 'child_process';
 import {promisify} from 'util';
 import path from 'path';
+
 const exec = promisify(execCallBack);
 
-const getDateDirName = async (imagePath) => {
+const getTimestamp = async (imagePath) => {
   // get file modified date
   const {mtime} = await fs.stat(imagePath);
-  return new Date(mtime).toISOString().split('T')[0];
+  return new Date(mtime).toISOString();
 }
 
 const getModelDirName = async (imagePath) => {
@@ -25,6 +26,12 @@ const getModelDirName = async (imagePath) => {
   return models.join('/');
 }
 
+const getDestDir = (imagePath, timestamp, modelDirName) => {
+  const newFileName = new Date(timestamp).getTime() + '.png';
+  const dateDirName = new Date(timestamp).toISOString().split('T')[0];
+  const destDir = path.join('./out', modelDirName, dateDirName, newFileName);
+  return destDir;
+}
 const findImageFiles = async (dirPath) => {
   console.log('findImageFiles: looking at', dirPath);
   const files = await fs.readdir(dirPath);
@@ -47,9 +54,9 @@ const findImageFiles = async (dirPath) => {
       console.log('ignoring', file);
       continue;
     }
-    const dateDirName = await getDateDirName(filePath);
+    const timestamp = await getTimestamp(filePath);
     const modelDirName = await getModelDirName(filePath);
-    const destDir = path.join('./out', dateDirName, modelDirName);
+    const destDir = getDestDir(filePath, timestamp, modelDirName);
     console.log({destDir});
   }
 }
