@@ -8,12 +8,12 @@ const exec = promisify(execCallBack);
 const getDateDirName = async (imagePath) => {
   // get file modified date
   const {mtime} = await fs.stat(imagePath);
-  return new Date(mtime).toISOString();
+  return new Date(mtime).toISOString().split('T')[0];
 }
 
 const getModelDirName = async (imagePath) => {
   // exec exiftool -p prompt imagePath
-  const {stdout} = await exec(`exiftool -b '-prompt' ${imagePath}`);
+  const {stdout} = await exec(`exiftool -b -prompt ${imagePath}`, {maxBuffer: 1024 * 1024 * 1024});
   const flow = JSON.parse(stdout);
   const models = []
   for(const nodeId in flow) {
@@ -36,9 +36,21 @@ const findImageFiles = async (dirPath) => {
       console.log('filePath:', filePath, 'isDirectory');
       findImageFiles(filePath);
     }
-    // await getModelDirName('./in/rave/1/3_00001_.png');
-    // await getDateDirName('./in/rave/1/3_00001_.png');
     console.log("is file", filePath);
+    //if it starts with %, then ignore it for now
+    if(file.startsWith('%')) {
+      console.log('ignoring', file);
+      continue;
+    }
+    // if the file doesn't end with .png, ignore it'
+    if(!file.endsWith('.png')) {
+      console.log('ignoring', file);
+      continue;
+    }
+    const dateDirName = await getDateDirName(filePath);
+    const modelDirName = await getModelDirName(filePath);
+    const destDir = path.join('./out', dateDirName, modelDirName);
+    console.log({destDir});
   }
 }
 const main = async () => {
