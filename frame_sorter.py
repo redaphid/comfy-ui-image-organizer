@@ -4,8 +4,9 @@ import numpy as np
 import cv2
 import torch
 import shutil
+import sys
 from transformers import AutoFeatureExtractor, AutoModel
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
 from typing import List, Tuple, Optional
 
 def debug_print(debug: bool, message: str) -> None:
@@ -37,13 +38,31 @@ def extract_frame_features(frame_path: str, feature_extractor: AutoFeatureExtrac
 
     # Extract the feature vector and flatten it for clustering
     feature_vector = outputs.last_hidden_state.mean(dim=1).flatten().numpy()
-    debug_print(debug, f"Extracted and flattened features for frame: {frame_path}")
     return feature_vector
 
-def group_frames_by_features(features: np.ndarray, debug: bool = False) -> np.ndarray:
+def group_frames_by_features_dbscan(features: np.ndarray, eps: float = 0.5, min_samples: int = 2, debug: bool = False) -> np.ndarray:
     """Cluster frames based on their extracted features using DBSCAN."""
-    clustering = DBSCAN(eps=0.5, min_samples=2).fit(features)
-    debug_print(debug, "Performed clustering on extracted features.")
+    debug_print(debug, f"Running DBSCAN with eps={eps} and min_samples={min_samples}")
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(features)
+
+    # Log the clustering labels
+    unique_labels = set(clustering.labels_)
+    debug_print(debug, f"DBSCAN found {len(unique_labels)} groups (including noise).")
+    if -1 in unique_labels:
+        noise_points = list(clustering.labels_).count(-1)
+        debug_print(debug, f"DBSCAN classified {noise_points} points as noise (label -1).")
+
+    return clustering.labels_
+
+def group_frames_by_features_kmeans(features: np.ndarray, num_groups: int, debug: bool = False) -> np.ndarray:
+    """Cluster frames using KMeans clustering."""
+    debug_print(debug, f"Running KMeans with {num_groups} clusters.")
+    clustering = KMeans(n_clusters=num_groups).fit(features)
+
+    # Log the clustering labels
+    unique_labels = set(clustering.labels_)
+    debug_print(debug, f"KMeans created {len(unique_labels)} clusters.")
+
     return clustering.labels_
 
 def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndarray, output_dir: str, debug: bool = False) -> None:
@@ -66,27 +85,44 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     for label, count in group_file_count.items():
         print(f"Group {label}: {count} files.")
 
+def update_progress_bar(total_frames: int, current_frame: int) -> None:
+    """Display a progress bar or status update for frame processing."""
+    sys.stdout.write(f"\rProcessed {current_frame}/{total_frames} frames")
+    sys.stdout.flush()
+
 def main() -> None:
     """Main function to process video frames and group them by similarity."""
     parser = argparse.ArgumentParser(description="Sort video frames into groups based on similarity.")
     parser.add_argument('-i', '--inputDir', required=True, help="Directory containing the video frames.")
     parser.add_argument('-o', '--outputDir', required=True, help="Directory where the sorted frames will be saved.")
     parser.add_argument('-m', '--modelName', default='google/vit-base-patch16-224-in21k', help="Hugging Face model name for feature extraction.")
+    parser.add_argument('-n', '--numGroups', type=int, default=None, help="Number of groups (clusters) for KMeans.")
+    parser.add_argument('-e', '--eps', type=float, default=0.5, help="DBSCAN epsilon (max distance between samples).")
+    parser.add_argument('--minSamples', type=int, default=2, help="DBSCAN minimum samples for a cluster.")
     parser.add_argument('-d', '--debug', action='store_true', help="Enable debug mode to print additional information.")
     args = parser.parse_args()
 
     # Load frame paths
     frame_paths: List[str] = load_frame_paths(args.inputDir, debug=args.debug)
-    print(f"Loaded {len(frame_paths)} frames from {args.inputDir}")
+    total_frames = len(frame_paths)
+    print(f"Loaded {total_frames} frames from {args.inputDir}")
 
     # Load Hugging Face model and feature extractor
     feature_extractor, model = load_huggingface_model(args.modelName, debug=args.debug)
 
-    # Extract features for all frames
-    features: List[np.ndarray] = [extract_frame_features(fp, feature_extractor, model, debug=args.debug) for fp in frame_paths]
+    # Extract features for all frames and update progress
+    features: List[np.ndarray] = []
+    for i, frame_path in enumerate(frame_paths):
+        feature = extract_frame_features(frame_path, feature_extractor, model, debug=args.debug)
+        features.append(feature)
+        update_progress_bar(total_frames, i + 1)  # Update progress bar after each frame
+    print()  # To ensure the final newline after progress bar
 
-    # Group frames based on features
-    labels: np.ndarray = group_frames_by_features(np.array(features), debug=args.debug)
+    # Perform clustering
+    if args.numGroups:
+        labels = group_frames_by_features_kmeans(np.array(features), args.numGroups, debug=args.debug)
+    else:
+        labels = group_frames_by_features_dbscan(np.array(features), eps=args.eps, min_samples=args.minSamples, debug=args.debug)
 
     # Save frames into groups and log group sizes
     save_frames_to_directories_by_labels(frame_paths, labels, args.outputDir, debug=args.debug)
