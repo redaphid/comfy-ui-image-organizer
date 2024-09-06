@@ -10,21 +10,19 @@ from transformers import AutoFeatureExtractor, AutoModel
 from sklearn.cluster import DBSCAN, KMeans
 from typing import List, Tuple, Optional
 
+MAX_FILE_SIZE_MB = 10  # Maximum file size in megabytes
+
 def debug_print(debug: bool, message: str) -> None:
     """Print debug information if debug mode is enabled."""
     if debug:
         print(f"DEBUG: {message}")
 
 def load_frame_paths(directory: str, limit: Optional[int] = None, debug: bool = False) -> List[str]:
-    """Load frame file paths, sort them by the numeric part of the filename, and apply the optional limit."""
-    frames = [f for f in os.listdir(directory) if f.endswith('.png')]
+    """Load frame file paths, sort them by file creation time, and apply the optional limit."""
+    frames = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.png')]
 
-    # Define a regex pattern to extract the numeric part of the filename
-    numeric_part = re.compile(r'\d+')
-
-    # Sort by the first numeric part found in the filename
-    frame_paths = sorted([os.path.join(directory, f) for f in frames],
-                         key=lambda x: int(numeric_part.search(os.path.basename(x)).group()))
+    # Sort by file creation time (use `st_ctime`, or `st_mtime` if creation time is not available)
+    frame_paths = sorted(frames, key=lambda x: os.stat(x).st_ctime)
 
     # Apply limit if provided
     if limit:
@@ -40,8 +38,15 @@ def load_huggingface_model(model_name: str, debug: bool = False) -> Tuple[AutoFe
     model = AutoModel.from_pretrained(model_name)
     return feature_extractor, model
 
-def extract_frame_features(frame_path: str, feature_extractor: AutoFeatureExtractor, model: AutoModel, debug: bool = False) -> np.ndarray:
-    """Extract features from a single image frame using a Hugging Face model."""
+def extract_frame_features(frame_path: str, feature_extractor: AutoFeatureExtractor, model: AutoModel, debug: bool = False) -> Optional[np.ndarray]:
+    """Extract features from a single image frame using a Hugging Face model, ignoring files larger than 10 MB."""
+
+    # Check the file size and ignore files larger than 10MB
+    file_size_mb = os.path.getsize(frame_path) / (1024 * 1024)
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        debug_print(debug, f"Skipping {frame_path}: File size {file_size_mb:.2f} MB exceeds 10 MB.")
+        return None
+
     image = cv2.imread(frame_path)
     inputs = feature_extractor(images=image, return_tensors="pt")
 
@@ -78,8 +83,14 @@ def group_frames_by_features_kmeans(features: np.ndarray, num_groups: int, debug
 
     return kmeans.labels_
 
+def save_checkpoint(features: List[np.ndarray], output_dir: str, iteration: int, debug: bool = False) -> None:
+    """Save progress at a given iteration to a checkpoint file."""
+    checkpoint_path = os.path.join(output_dir, f"checkpoint_{iteration}.npz")
+    np.savez_compressed(checkpoint_path, features=features)
+    debug_print(debug, f"Saved progress at iteration {iteration} to {checkpoint_path}.")
+
 def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndarray, output_dir: str, debug: bool = False) -> None:
-    """Save frames into directories based on their labels (group), ordered by group size."""
+    """Save frames into directories based on their labels (group), ordered by group size and sorted by creation time."""
     unique_labels = set(labels)
 
     # Count files in each group
@@ -88,16 +99,21 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     # Sort groups by the number of files in descending order
     sorted_groups = sorted(group_file_count.items(), key=lambda x: x[1], reverse=True)
 
-    # Create directories and save files, numbering by group size
+    # For each group, save the frames sorted by file creation time
     for rank, (label, _) in enumerate(sorted_groups, 1):
+        # Collect frame paths and sort by creation time
+        group_frames = [(fp, os.stat(fp).st_ctime) for i, fp in enumerate(frame_paths) if labels[i] == label]
+        group_frames_sorted = sorted(group_frames, key=lambda x: x[1])  # Sort by creation time
+
+        # Create output directory for the group
         group_dir = os.path.join(output_dir, f"{rank}_video_{label}")
         os.makedirs(group_dir, exist_ok=True)
-        for i, frame_path in enumerate(frame_paths):
-            if labels[i] == label:
-                frame_name = os.path.basename(frame_path)
-                dest_path = os.path.join(group_dir, frame_name)
-                shutil.copy2(frame_path, dest_path)  # Copy instead of moving
-                debug_print(debug, f"Copied {frame_path} to {dest_path}")
+
+        # Copy and rename files sequentially (1.png, 2.png, ...)
+        for seq_num, (frame_path, _) in enumerate(group_frames_sorted, 1):
+            dest_path = os.path.join(group_dir, f"{seq_num}.png")
+            shutil.copy2(frame_path, dest_path)  # Copy instead of moving
+            debug_print(debug, f"Copied {frame_path} to {dest_path}")
 
     # Log group and file info
     debug_print(debug, f"Found {len(unique_labels)} groups.")
@@ -117,9 +133,9 @@ def main() -> None:
     parser.add_argument('-m', '--modelName', default='google/vit-base-patch16-224-in21k', help="Hugging Face model name for feature extraction.")
     parser.add_argument('-n', '--numGroups', type=int, default=None, help="Number of groups (clusters) for KMeans.")
     parser.add_argument('-e', '--eps', type=float, default=0.5, help="DBSCAN epsilon (max distance between samples).")
-    parser.add_argument('--minSamples', type=int, default=10, help="DBSCAN minimum samples for a cluster.")
+    parser.add_argument('--minSamples', type=int, default=2, help="DBSCAN minimum samples for a cluster.")
     parser.add_argument('--limit', type=int, help="Limit the number of files to process.")
-    # parser.add_argument('--checkpointInterval', type=int, default=250, help="Interval for saving checkpoints.")
+    parser.add_argument('--checkpointInterval', type=int, default=100, help="Interval for saving checkpoints.")
     parser.add_argument('-d', '--debug', action='store_true', help="Enable debug mode to print additional information.")
     args = parser.parse_args()
 
@@ -135,11 +151,12 @@ def main() -> None:
     features: List[np.ndarray] = []
     for i, frame_path in enumerate(frame_paths):
         feature = extract_frame_features(frame_path, feature_extractor, model, debug=args.debug)
-        features.append(feature)
+        if feature is not None:  # Only add features for frames that are not too large
+            features.append(feature)
 
-        # # Save progress periodically based on the checkpoint interval
-        # if (i + 1) % args.checkpointInterval == 0:
-        #     save_checkpoint(features, args.outputDir, i + 1, debug=args.debug)
+        # Save progress periodically based on the checkpoint interval
+        if (i + 1) % args.checkpointInterval == 0:
+            save_checkpoint(features, "tmp", i + 1, debug=args.debug)
 
         # Update progress bar
         update_progress_bar(total_frames, i + 1)
