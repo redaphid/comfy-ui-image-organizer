@@ -188,7 +188,7 @@ def main() -> None:
     parser.add_argument('-o', '--outputDir', required=True, help="Directory where the sorted frames will be saved.")
     parser.add_argument('-m', '--modelName', default='google/vit-base-patch16-224-in21k', help="Hugging Face model name for feature extraction.")
     parser.add_argument('-n', '--numGroups', type=int, help="Number of groups (clusters) for KMeans.")
-    parser.add_argument('-e', '--eps', type=float, default=0.75, help="DBSCAN epsilon (max distance between samples).")
+    parser.add_argument('-e', '--eps', type=float, default=0.5, help="DBSCAN epsilon (max distance between samples).")
     parser.add_argument('--minSamples', type=int, default=5, help="DBSCAN minimum samples for a cluster.")
     parser.add_argument('--limit', type=int, help="Limit the number of files to process.")
     parser.add_argument('--checkpointInterval', type=int, default=100, help="Interval for saving checkpoints.")
