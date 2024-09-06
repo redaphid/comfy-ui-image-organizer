@@ -5,6 +5,7 @@ import cv2
 import torch
 import shutil
 import sys
+import re
 from transformers import AutoFeatureExtractor, AutoModel
 from sklearn.cluster import DBSCAN, KMeans
 from typing import List, Tuple, Optional
@@ -14,10 +15,21 @@ def debug_print(debug: bool, message: str) -> None:
     if debug:
         print(f"DEBUG: {message}")
 
-def load_frame_paths(directory: str, debug: bool = False) -> List[str]:
-    """Load frame file paths and sort them by timestamp."""
+def load_frame_paths(directory: str, limit: Optional[int] = None, debug: bool = False) -> List[str]:
+    """Load frame file paths, sort them by the numeric part of the filename, and apply the optional limit."""
     frames = [f for f in os.listdir(directory) if f.endswith('.png')]
-    frame_paths = sorted([os.path.join(directory, f) for f in frames], key=lambda x: int(os.path.basename(x).split('.')[0]))
+
+    # Define a regex pattern to extract the numeric part of the filename
+    numeric_part = re.compile(r'\d+')
+
+    # Sort by the first numeric part found in the filename
+    frame_paths = sorted([os.path.join(directory, f) for f in frames],
+                         key=lambda x: int(numeric_part.search(os.path.basename(x)).group()))
+
+    # Apply limit if provided
+    if limit:
+        frame_paths = frame_paths[:limit]
+
     debug_print(debug, f"Found {len(frame_paths)} frames.")
     return frame_paths
 
@@ -43,9 +55,10 @@ def extract_frame_features(frame_path: str, feature_extractor: AutoFeatureExtrac
 def group_frames_by_features_dbscan(features: np.ndarray, eps: float = 0.5, min_samples: int = 2, debug: bool = False) -> np.ndarray:
     """Cluster frames based on their extracted features using DBSCAN."""
     debug_print(debug, f"Running DBSCAN with eps={eps} and min_samples={min_samples}")
+
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(features)
 
-    # Log the clustering labels
+    # Log the clustering process
     unique_labels = set(clustering.labels_)
     debug_print(debug, f"DBSCAN found {len(unique_labels)} groups (including noise).")
     if -1 in unique_labels:
@@ -57,21 +70,27 @@ def group_frames_by_features_dbscan(features: np.ndarray, eps: float = 0.5, min_
 def group_frames_by_features_kmeans(features: np.ndarray, num_groups: int, debug: bool = False) -> np.ndarray:
     """Cluster frames using KMeans clustering."""
     debug_print(debug, f"Running KMeans with {num_groups} clusters.")
-    clustering = KMeans(n_clusters=num_groups).fit(features)
+    kmeans = KMeans(n_clusters=num_groups, n_init=10, verbose=1 if debug else 0).fit(features)
 
-    # Log the clustering labels
-    unique_labels = set(clustering.labels_)
+    # Log the clustering result
+    unique_labels = set(kmeans.labels_)
     debug_print(debug, f"KMeans created {len(unique_labels)} clusters.")
 
-    return clustering.labels_
+    return kmeans.labels_
 
 def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndarray, output_dir: str, debug: bool = False) -> None:
-    """Save frames into directories based on their labels (group)."""
+    """Save frames into directories based on their labels (group), ordered by group size."""
     unique_labels = set(labels)
+
+    # Count files in each group
     group_file_count = {label: labels.tolist().count(label) for label in unique_labels}
 
-    for label in unique_labels:
-        group_dir = os.path.join(output_dir, f"video_{label}")
+    # Sort groups by the number of files in descending order
+    sorted_groups = sorted(group_file_count.items(), key=lambda x: x[1], reverse=True)
+
+    # Create directories and save files, numbering by group size
+    for rank, (label, _) in enumerate(sorted_groups, 1):
+        group_dir = os.path.join(output_dir, f"{rank}_video_{label}")
         os.makedirs(group_dir, exist_ok=True)
         for i, frame_path in enumerate(frame_paths):
             if labels[i] == label:
@@ -82,8 +101,8 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
 
     # Log group and file info
     debug_print(debug, f"Found {len(unique_labels)} groups.")
-    for label, count in group_file_count.items():
-        print(f"Group {label}: {count} files.")
+    for rank, (label, count) in enumerate(sorted_groups, 1):
+        print(f"Group {rank} (label {label}): {count} files.")
 
 def update_progress_bar(total_frames: int, current_frame: int) -> None:
     """Display a progress bar or status update for frame processing."""
@@ -98,12 +117,14 @@ def main() -> None:
     parser.add_argument('-m', '--modelName', default='google/vit-base-patch16-224-in21k', help="Hugging Face model name for feature extraction.")
     parser.add_argument('-n', '--numGroups', type=int, default=None, help="Number of groups (clusters) for KMeans.")
     parser.add_argument('-e', '--eps', type=float, default=0.5, help="DBSCAN epsilon (max distance between samples).")
-    parser.add_argument('--minSamples', type=int, default=2, help="DBSCAN minimum samples for a cluster.")
+    parser.add_argument('--minSamples', type=int, default=10, help="DBSCAN minimum samples for a cluster.")
+    parser.add_argument('--limit', type=int, help="Limit the number of files to process.")
+    # parser.add_argument('--checkpointInterval', type=int, default=250, help="Interval for saving checkpoints.")
     parser.add_argument('-d', '--debug', action='store_true', help="Enable debug mode to print additional information.")
     args = parser.parse_args()
 
     # Load frame paths
-    frame_paths: List[str] = load_frame_paths(args.inputDir, debug=args.debug)
+    frame_paths: List[str] = load_frame_paths(args.inputDir, limit=args.limit, debug=args.debug)
     total_frames = len(frame_paths)
     print(f"Loaded {total_frames} frames from {args.inputDir}")
 
@@ -115,7 +136,13 @@ def main() -> None:
     for i, frame_path in enumerate(frame_paths):
         feature = extract_frame_features(frame_path, feature_extractor, model, debug=args.debug)
         features.append(feature)
-        update_progress_bar(total_frames, i + 1)  # Update progress bar after each frame
+
+        # # Save progress periodically based on the checkpoint interval
+        # if (i + 1) % args.checkpointInterval == 0:
+        #     save_checkpoint(features, args.outputDir, i + 1, debug=args.debug)
+
+        # Update progress bar
+        update_progress_bar(total_frames, i + 1)
     print()  # To ensure the final newline after progress bar
 
     # Perform clustering
@@ -123,6 +150,11 @@ def main() -> None:
         labels = group_frames_by_features_kmeans(np.array(features), args.numGroups, debug=args.debug)
     else:
         labels = group_frames_by_features_dbscan(np.array(features), eps=args.eps, min_samples=args.minSamples, debug=args.debug)
+
+    # Output the number of groups found (excluding noise if using DBSCAN)
+    unique_labels = set(labels)
+    num_groups = len(unique_labels) - (1 if -1 in unique_labels else 0)  # Exclude noise (-1) if present
+    print(f"Number of groups found: {num_groups}")
 
     # Save frames into groups and log group sizes
     save_frames_to_directories_by_labels(frame_paths, labels, args.outputDir, debug=args.debug)
