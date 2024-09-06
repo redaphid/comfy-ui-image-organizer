@@ -103,7 +103,7 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     # Handle noise frames (-1 label)
     if -1 in unique_labels:
         noise_frames = [(fp, os.stat(fp).st_birthtime) for i, fp in enumerate(frame_paths) if labels[i] == -1]
-        noise_dir = os.path.join(output_dir, "noise_frames")
+        noise_dir = os.path.join(output_dir, "unclassified")
         os.makedirs(noise_dir, exist_ok=True)
 
         for frame_path, creation_time in sorted(noise_frames, key=lambda x: x[1]):
