@@ -10,6 +10,7 @@ from transformers import AutoFeatureExtractor, AutoModel
 from sklearn.cluster import DBSCAN, KMeans
 from typing import List, Tuple, Optional
 
+from datetime import datetime, timezone
 MAX_FILE_SIZE_MB = 10  # Maximum file size in megabytes
 
 def debug_print(debug: bool, message: str) -> None:
@@ -99,7 +100,7 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     # Sort groups by the number of files in descending order
     sorted_groups = sorted(group_file_count.items(), key=lambda x: x[1], reverse=True)
 
-    # For each group, save the frames sorted by file creation time
+    # For each group, save the frames sorted by creation time
     for rank, (label, _) in enumerate(sorted_groups, 1):
         # Collect frame paths and sort by creation time
         group_frames = [(fp, os.stat(fp).st_ctime) for i, fp in enumerate(frame_paths) if labels[i] == label]
@@ -109,9 +110,12 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
         group_dir = os.path.join(output_dir, f"{rank}_video_{label}")
         os.makedirs(group_dir, exist_ok=True)
 
-        # Copy and rename files sequentially (1.png, 2.png, ...)
-        for seq_num, (frame_path, _) in enumerate(group_frames_sorted, 1):
-            dest_path = os.path.join(group_dir, f"{seq_num}.png")
+        # Copy and rename files using a modified ISO-8601 UTC format for creation time
+        for frame_path, creation_time in group_frames_sorted:
+            # Convert the creation time to ISO-8601 UTC format, replacing colons with hyphens for Windows compatibility
+            iso_time = datetime.fromtimestamp(creation_time, tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+            dest_path = os.path.join(group_dir, f"{iso_time}.png")
+
             shutil.copy2(frame_path, dest_path)  # Copy instead of moving
             debug_print(debug, f"Copied {frame_path} to {dest_path}")
 
@@ -119,6 +123,7 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     debug_print(debug, f"Found {len(unique_labels)} groups.")
     for rank, (label, count) in enumerate(sorted_groups, 1):
         print(f"Group {rank} (label {label}): {count} files.")
+
 
 def update_progress_bar(total_frames: int, current_frame: int) -> None:
     """Display a progress bar or status update for frame processing."""
