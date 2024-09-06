@@ -58,10 +58,9 @@ const copyGroupedImages = async (groups, outputDir) => {
   );
 };
 
-// Compare hashes and group similar images asynchronously
-const groupImagesBySimilarity = async (hashedImages) => {
+// Compare hashes and group similar images asynchronously based on tolerance
+const groupImagesBySimilarity = async (hashedImages, tolerance) => {
   const groups = [];
-  const tolerance = 10; // Hash difference tolerance for grouping similar images
 
   await Promise.all(
     hashedImages.map(async (image) => {
@@ -105,14 +104,41 @@ const getHammingDistance = (hash1, hash2) => {
   return distance;
 };
 
+// Dynamically adjust tolerance to get the desired number of groups
+const adjustSimilarityToGetGroups = async (hashedImages, targetGroups) => {
+  let tolerance = 10; // Start with a sensible default tolerance
+  let groups = await groupImagesBySimilarity(hashedImages, tolerance);
+
+  let maxIterations = 100; // Limit the number of iterations to prevent infinite loops
+
+  while (groups.length !== targetGroups && maxIterations-- > 0) {
+    if (groups.length > targetGroups) {
+      tolerance += 1; // Increase tolerance to reduce the number of groups
+    } else {
+      tolerance -= 1; // Decrease tolerance to increase the number of groups
+    }
+
+    groups = await groupImagesBySimilarity(hashedImages, tolerance);
+
+    // If we hit a tolerance limit that doesn't change the number of groups, break out
+    if (tolerance <= 0 || tolerance >= 64) {
+      console.error(`Unable to achieve exactly ${targetGroups} groups. Closest achieved: ${groups.length}`);
+      break;
+    }
+  }
+
+  return { groups, tolerance };
+};
+
 // Main function to group images by similarity, copy them to sorted group folders, and print stride length
 const main = async () => {
   const {
-    values: { inputDir, outputDir },
+    values: { inputDir, outputDir, numGroups },
   } = parseArgs({
     options: {
       inputDir: { type: 'string', short: 'i' },
       outputDir: { type: 'string', short: 'o' },
+      numGroups: { type: 'string', short: 'n', default: '5' }, // Default number of groups is 5
     },
   });
 
@@ -120,6 +146,9 @@ const main = async () => {
     console.error('You must provide both --inputDir (-i) and --outputDir (-o).');
     process.exit(1);
   }
+
+  const targetGroups = parseInt(numGroups, 10);
+  console.log(`Target number of groups: ${targetGroups}`);
 
   // Find all PNG files in the input directory
   const pngFiles = await findPngFiles(inputDir);
@@ -139,16 +168,12 @@ const main = async () => {
     process.exit(1);
   }
 
-  // Group images by similarity
-  const imageGroups = await groupImagesBySimilarity(hashedImages);
+  // Adjust similarity tolerance to achieve the desired number of groups
+  const { groups, tolerance } = await adjustSimilarityToGetGroups(hashedImages, targetGroups);
+  console.log(`Achieved ${groups.length} groups with a tolerance of ${tolerance}`);
 
   // Sort groups by their number of members in descending order
-  const sortedGroups = sortGroupsBySize(imageGroups);
-
-  // The number of groups can be used as the stride length
-  const strideLength = sortedGroups.length;
-
-  console.log(`Stride length (number of groups): ${strideLength}`);
+  const sortedGroups = sortGroupsBySize(groups);
 
   // Copy grouped images to the output directory
   await copyGroupedImages(sortedGroups, outputDir);
