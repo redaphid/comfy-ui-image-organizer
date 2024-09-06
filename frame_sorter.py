@@ -22,8 +22,8 @@ def load_frame_paths(directory: str, limit: Optional[int] = None, debug: bool = 
     """Load frame file paths, sort them by file creation time, and apply the optional limit."""
     frames = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.png')]
 
-    # Sort by file creation time (use `st_ctime`, or `st_mtime` if creation time is not available)
-    frame_paths = sorted(frames, key=lambda x: os.stat(x).st_ctime)
+    # Sort by file creation time (use `st_birthtime`, or `st_mtime` if creation time is not available)
+    frame_paths = sorted(frames, key=lambda x: os.stat(x).st_birthtime)
 
     # Apply limit if provided
     if limit:
@@ -100,10 +100,28 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
     # Sort groups by the number of files in descending order
     sorted_groups = sorted(group_file_count.items(), key=lambda x: x[1], reverse=True)
 
-    # For each group, save the frames sorted by creation time
+    # Handle noise frames (-1 label)
+    if -1 in unique_labels:
+        noise_frames = [(fp, os.stat(fp).st_birthtime) for i, fp in enumerate(frame_paths) if labels[i] == -1]
+        noise_dir = os.path.join(output_dir, "noise_frames")
+        os.makedirs(noise_dir, exist_ok=True)
+
+        for frame_path, creation_time in sorted(noise_frames, key=lambda x: x[1]):
+            iso_time = datetime.fromtimestamp(creation_time, tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
+            dest_path = os.path.join(noise_dir, f"{iso_time}.png")
+            shutil.copy2(frame_path, dest_path)
+            debug_print(debug, f"Copied noise frame {frame_path} to {dest_path}")
+
+        # Remove noise label from unique labels to avoid creating a folder for it
+        unique_labels.remove(-1)
+
+    # For each group, save the frames sorted by file creation time
     for rank, (label, _) in enumerate(sorted_groups, 1):
+        if label == -1:
+            continue  # Skip the noise label as it's handled separately
+
         # Collect frame paths and sort by creation time
-        group_frames = [(fp, os.stat(fp).st_ctime) for i, fp in enumerate(frame_paths) if labels[i] == label]
+        group_frames = [(fp, os.stat(fp).st_birthtime) for i, fp in enumerate(frame_paths) if labels[i] == label]
         group_frames_sorted = sorted(group_frames, key=lambda x: x[1])  # Sort by creation time
 
         # Create output directory for the group
@@ -112,18 +130,15 @@ def save_frames_to_directories_by_labels(frame_paths: List[str], labels: np.ndar
 
         # Copy and rename files using a modified ISO-8601 UTC format for creation time
         for frame_path, creation_time in group_frames_sorted:
-            # Convert the creation time to ISO-8601 UTC format, replacing colons with hyphens for Windows compatibility
             iso_time = datetime.fromtimestamp(creation_time, tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
             dest_path = os.path.join(group_dir, f"{iso_time}.png")
-
-            shutil.copy2(frame_path, dest_path)  # Copy instead of moving
+            shutil.copy2(frame_path, dest_path)
             debug_print(debug, f"Copied {frame_path} to {dest_path}")
 
     # Log group and file info
     debug_print(debug, f"Found {len(unique_labels)} groups.")
     for rank, (label, count) in enumerate(sorted_groups, 1):
         print(f"Group {rank} (label {label}): {count} files.")
-
 
 def update_progress_bar(total_frames: int, current_frame: int) -> None:
     """Display a progress bar or status update for frame processing."""
